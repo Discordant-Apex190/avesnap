@@ -114,6 +114,11 @@ def join_common_names(lf_aves_data):
     )
     return ave_data_w_cnames
 
+
+# After running the code I realized that the filtering made the dataset small enough to be written in a single file, 
+# I intially had partitioning in mind to optimize for query performance, but given the reduced dataset size, 
+# but I decided to write it as a single file to simplify the process.
+# I'll leave it commented it out just in case I add more data.
 @task
 def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
     storage_options = {
@@ -124,14 +129,15 @@ def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
     }
     
     bucket_name = "gbif-data-bucket"
-    remote_path = f"s3://{bucket_name}/gbif_data/"
+    remote_path = f"s3://{bucket_name}/gbif_data/processed_aves.parquet"
 
     ave_data_w_cnames.sink_parquet(
-        pl.PartitionBy(
-            remote_path,
-            key="stateprovince",
-            approximate_bytes_per_file=CHUNK_SIZE,
-        ),
+        # pl.PartitionBy(
+        #     remote_path,
+        #     key="stateprovince",
+        #     approximate_bytes_per_file=CHUNK_SIZE,
+        # ),
+        remote_path,
         compression="zstd",
         row_group_size=ROW_GROUP_SIZE,
         storage_options=storage_options
