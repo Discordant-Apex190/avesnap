@@ -10,3 +10,10 @@ wheels/
 .venv
 
 uv.lock
+
+out.parquet
+
+data/
+shape_data/
+
+gbif_data/
