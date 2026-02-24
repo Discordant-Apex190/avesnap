@@ -7,12 +7,10 @@ requires-python = ">=3.11"
 dependencies = [
     "adlfs>=2026.2.0",
     "boto3>=1.42.49",
-    "clickhouse-connect>=0.11.0",
-    "duckdb>=1.4.4",
     "fsspec>=2026.2.0",
     "gcsfs>=2026.2.0",
-    "matplotlib>=3.10.8",
     "polars[pyarrow]>=1.38.1",
+    "prefect>=3.6.18",
     "s3fs>=2026.2.0",
     "streamlit>=1.54.0",
     "tqdm>=4.67.3",
