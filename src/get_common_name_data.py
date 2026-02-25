@@ -56,7 +56,7 @@ try:
         )
         .filter(pl.col("countryCode") == "US")
         .select([
-            pl.col("taxonID").cast(pl.Int64).alias("taxonkey"),
+            pl.col("taxonID").cast(pl.Int64),
             pl.col("vernacularName")
         ])
         .sink_parquet(os.path.join(save_dir, "vernacular_names.parquet"))

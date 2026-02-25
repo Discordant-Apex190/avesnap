@@ -3,7 +3,6 @@ from botocore import UNSIGNED
 from botocore.config import Config
 import polars as pl
 import os
-from timeit import default_timer as timer
 from prefect import flow, task
 
 CHUNK_SIZE = 250 * (1024**2)
@@ -86,7 +85,11 @@ def join_common_names(lf_aves_data):
     save_path_for_tsv = "data/vernacular_names.parquet"
     full_path = os.path.abspath(save_path_for_tsv)
     lf_common_name = pl.scan_parquet(source=full_path)
-    ave_data_w_cnames = lf_aves_data.join(lf_common_name, on="taxonkey")
+    ave_data_w_cnames = lf_aves_data.join(
+        lf_common_name, 
+        left_on="taxonkey",
+        right_on="taxonID"
+    )
     ave_data_w_cnames = ave_data_w_cnames.select(
         "gbifid",
         "decimallatitude",
@@ -139,13 +142,13 @@ def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
 
 @flow
 def avesnap_etl():
-    start = timer()
     s3_uris = get_s3_uris()
     lf_aves_data = process_aves_data(s3_uris)
     ave_data_w_cnames = join_common_names(lf_aves_data)
     sink_parquet(ave_data_w_cnames)
-    end = timer()
-    print(f"Full script execution time: {end - start:.4f} seconds")
 
 if __name__ == "__main__":
-    avesnap_etl()
+    avesnap_etl.serve(
+        name="avesnap_data_pipeline",
+        cron="0 0 1 * *")
+
