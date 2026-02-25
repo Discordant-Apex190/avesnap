@@ -4,157 +4,176 @@ from botocore.config import Config
 import polars as pl
 import os
 from prefect import flow, task
+import requests
+from tqdm import tqdm
+from zipfile import ZipFile
 
-CHUNK_SIZE = 250 * (1024**2)
+ONE_KB = 1024
+CHUNK_SIZE_ZIP = ONE_KB * 2000
 ROW_GROUP_SIZE = 122880
+
+SAVE_DIR = "data"
+ZIP_PATH = os.path.join(SAVE_DIR, "backbone.zip")
+TSV_FILE_NAME = "VernacularName.tsv"
+TSV_PATH = os.path.join(SAVE_DIR, TSV_FILE_NAME)
+PARQUET_CNAME_PATH = os.path.join(SAVE_DIR, "vernacular_names.parquet")
+BACKBONE_DATA_URL = "https://hosted-datasets.gbif.org/datasets/backbone/current/backbone.zip"
+
+@task()
+def get_common_name_tsv():
+    """Downloads the GBIF backbone zip and extracts the VernacularName TSV."""
+    os.makedirs(SAVE_DIR, exist_ok=True)
+    
+    try:
+        response = requests.get(BACKBONE_DATA_URL, stream=True)
+        response.raise_for_status()
+        total_size = int(response.headers.get('content-length', 0))
+        
+        with tqdm(total=total_size, unit='iB', unit_scale=True, desc="Downloading GBIF Backbone") as t:
+            with open(ZIP_PATH, 'wb') as f:
+                for chunk in response.iter_content(chunk_size=CHUNK_SIZE_ZIP):
+                    if chunk:
+                        f.write(chunk)
+                        t.update(len(chunk))
+                        
+        with ZipFile(ZIP_PATH, 'r') as z_object:
+            z_object.extract(TSV_FILE_NAME, path=SAVE_DIR)
+            
+    finally:
+        if os.path.exists(ZIP_PATH):
+            os.remove(ZIP_PATH)
+    
+    return TSV_PATH
+
+@task
+def push_common_names_parquet(tsv_file_path):
+    """Converts the raw TSV to a filtered, typed Parquet file locally."""
+    (
+        pl.scan_csv(
+            tsv_file_path,
+            separator="\t",
+            quote_char=None,
+            ignore_errors=True,
+            infer_schema_length=10000
+        )
+        .filter(pl.col("countryCode") == "US")
+        .select([
+            pl.col("taxonID").cast(pl.Int64),
+            pl.col("vernacularName")
+        ])
+        .sink_parquet(PARQUET_CNAME_PATH)
+    )
+    
+    if os.path.exists(tsv_file_path):
+        os.remove(tsv_file_path)
+    return PARQUET_CNAME_PATH
 
 @task
 def get_s3_uris():
+    """Identifies the latest GBIF snapshot files from the Public S3 bucket."""
     s3 = boto3.client("s3", config=Config(signature_version=UNSIGNED))
     bucket = "gbif-open-data-us-east-1"
+    
     response = s3.list_objects_v2(Bucket=bucket, Prefix="occurrence/", Delimiter="/")
     folders = [prefix.get("Prefix") for prefix in response.get("CommonPrefixes", [])]
-    folders.sort()
-    latest_prefix = folders[-1]
+    if not folders:
+        raise Exception("No GBIF occurrence folders found.")
+    
+    latest_prefix = sorted(folders)[-1]
     target_prefix = f"{latest_prefix}occurrence.parquet/"
+    
     paginator = s3.get_paginator("list_objects_v2")
     pages = paginator.paginate(Bucket=bucket, Prefix=target_prefix)
+    
     s3_uris = []
     for page in pages:
-        if "Contents" in page:
-            for obj in page["Contents"]:
-                key = obj["Key"]
-                if "occurrence.parquet/" in key and not key.endswith("/"):
-                    s3_uris.append(f"s3://{bucket}/{key}")
-    print(f"Found {len(s3_uris)} data files to process.")
+        for obj in page.get("Contents", []):
+            key = obj["Key"]
+            if key.endswith(".parquet"):
+                s3_uris.append(f"s3://{bucket}/{key}")
+                
+    print(f"Found {len(s3_uris)} data files in snapshot {latest_prefix}")
     return s3_uris
 
 @task
 def process_aves_data(s3_uris):
-    lf_aves_data = pl.scan_parquet(
+    """Creates a LazyFrame for Aves (Birds) filtered by quality and location."""
+    return pl.scan_parquet(
         s3_uris,
         storage_options={
             "aws_region": "us-east-1",
             "skip_signature": "true",
         },
-    )
-    lf_aves_data = (
-        lf_aves_data.select(
-            "gbifid",
-            "class",
-            "countrycode",
-            "license",
-            "rightsholder",
-            "occurrencestatus",
-            "taxonkey",
-            "stateprovince",
-            "decimallatitude",
-            "decimallongitude",
-            "eventdate",
-            "year",
-            "month",
-            "coordinateuncertaintyinmeters",
-            "scientificname",
-            "genus",
-            "species",
-            "basisofrecord",
-            "issue",
-            "individualcount",
-            "establishmentmeans",
-            "mediatype",
-        )
-        .filter(pl.col("class") == "Aves")
-        .filter(pl.col("countrycode") == "US")
-        .filter(pl.col("occurrencestatus") == "PRESENT")
-        .filter(pl.col("decimallatitude").is_not_null())
-        .filter(pl.col("decimallongitude").is_not_null())
-        .filter(pl.col("coordinateuncertaintyinmeters") < 5000)
-        .filter(pl.col("year").is_not_null())
-        .filter(pl.col("individualcount") > 0)
-        .filter(pl.col("stateprovince").is_not_null())
-        .with_columns(pl.col("taxonkey").cast(pl.Int64))
-        .filter(
-            (pl.col("license").is_in(["CC0_1_0", "CC_BY_4_0"]))
-            & (pl.col("rightsholder").is_not_null() | pl.col("license").is_not_null())
-        )
-    )
-    return lf_aves_data
-
-@task
-def join_common_names(lf_aves_data):
-    save_path_for_tsv = "data/vernacular_names.parquet"
-    full_path = os.path.abspath(save_path_for_tsv)
-    lf_common_name = pl.scan_parquet(source=full_path)
-    ave_data_w_cnames = lf_aves_data.join(
-        lf_common_name, 
-        left_on="taxonkey",
-        right_on="taxonID"
-    )
-    ave_data_w_cnames = ave_data_w_cnames.select(
-        "gbifid",
-        "decimallatitude",
-        "decimallongitude",
-        "eventdate",
-        "year",
-        "month",
-        "coordinateuncertaintyinmeters",
-        "scientificname",
-        "license",
-        "rightsholder",
-        "stateprovince",
-        "genus",
-        "species",
-        "basisofrecord",
-        "issue",
-        "vernacularName",
-        "individualcount",
-        "establishmentmeans",
-        "mediatype",
+    ).filter(
+        (pl.col("class") == "Aves") &
+        (pl.col("countrycode") == "US") &
+        (pl.col("occurrencestatus") == "PRESENT") &
+        (pl.col("decimallatitude").is_not_null()) &
+        (pl.col("decimallongitude").is_not_null()) &
+        (pl.col("coordinateuncertaintyinmeters") < 5000) &
+        (pl.col("year").is_not_null()) &
+        (pl.col("individualcount") > 0) &
+        (pl.col("stateprovince").is_not_null()) &
+        (pl.col("license").is_in(["CC0_1_0", "CC_BY_4_0"])) &
+        (pl.col("rightsholder").is_not_null() | pl.col("license").is_not_null())
     ).with_columns(
-        (
-            pl.lit("https://www.gbif.org/occurrence/") + pl.col("gbifid").cast(pl.String)
-        ).alias("gbif_link")
+        pl.col("taxonkey").cast(pl.Int64)
     )
-    return ave_data_w_cnames
 
-
-# After running the code I realized that the filtering made the dataset small enough to be written in a single file, 
-# I intially had partitioning in mind to optimize for query performance, but given the reduced dataset size, 
-# but I decided to write it as a single file to simplify the process.
-# I'll leave it commented it out just in case I add more data.
 @task
-def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
+def join_and_enrich(lf_aves, cname_parquet_path):
+    """Joins bird observations with vernacular names and adds metadata."""
+    lf_common_names = pl.scan_parquet(cname_parquet_path)
+    
+    return (
+        lf_aves.join(
+            lf_common_names,
+            left_on="taxonkey",
+            right_on="taxonID",
+            how="left"
+        )
+        .with_columns(
+            gbif_link = pl.lit("https://www.gbif.org/occurrence/") + pl.col("gbifid").cast(pl.String)
+        )
+        .select([
+            "gbifid", "decimallatitude", "decimallongitude", "eventdate", 
+            "year", "month", "scientificname", "vernacularName", "stateprovince",
+            "basisofrecord", "individualcount", "gbif_link"
+        ])
+    )
+
+@task
+def sink_to_r2(lf_final: pl.LazyFrame):
+    """Sinks the processed LazyFrame to a remote R2/S3 bucket."""
     storage_options = {
         "aws_access_key_id": os.getenv("R2_ACCESS_KEY_ID"),
         "aws_secret_access_key": os.getenv("R2_SECRET_ACCESS_KEY"),
-        "aws_endpoint": os.getenv("R2_ENDPOINT_URL"), 
+        "aws_endpoint": os.getenv("R2_ENDPOINT_URL"),
         "aws_region": "auto",
     }
     
     bucket_name = "gbif-data-bucket"
     remote_path = f"s3://{bucket_name}/gbif_data/processed_aves.parquet"
 
-    ave_data_w_cnames.sink_parquet(
-        # pl.PartitionBy(
-        #     remote_path,
-        #     key="stateprovince",
-        #     approximate_bytes_per_file=CHUNK_SIZE,
-        # ),
+    lf_final.sink_parquet(
         remote_path,
         compression="zstd",
         row_group_size=ROW_GROUP_SIZE,
         storage_options=storage_options
     )
 
-@flow
+@flow(log_prints=True)
 def avesnap_etl():
+    tsv_path = get_common_name_tsv()
+    cname_path = push_common_names_parquet(tsv_path)
     s3_uris = get_s3_uris()
-    lf_aves_data = process_aves_data(s3_uris)
-    ave_data_w_cnames = join_common_names(lf_aves_data)
-    sink_parquet(ave_data_w_cnames)
+    lf_aves = process_aves_data(s3_uris)
+    lf_enriched = join_and_enrich(lf_aves, cname_path)
+    sink_to_r2(lf_enriched)
 
 if __name__ == "__main__":
+    avesnap_etl()
     avesnap_etl.serve(
         name="avesnap_data_pipeline",
-        cron="0 0 1 * *")
-
+        cron="0 0 1 * *"
+    )
