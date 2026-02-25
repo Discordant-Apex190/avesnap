@@ -1,7 +1,8 @@
 import requests
+from IPython.display import Image
 
 search_query = 'anhinga'
-number_of_results = 3
+number_of_results = 1
 endpoint = 'search/page'
 base_url = 'https://en.wikipedia.org/w/rest.php/v1/'
 
@@ -13,5 +14,10 @@ data = response.json()
 
 for page in data['pages']:
   print(page['title'])
+  print(page['excerpt'])
   print('https://en.wikipedia.org/wiki/' + page['key'])
+  if page['description'] is not None:
+    print(page['description'])
   print()
+  thumbnail_url = 'https:' + page['thumbnail']['url']
+display(Image(data=thumbnail_url, width=page['thumbnail']['width'], height=page['thumbnail']['height']))
