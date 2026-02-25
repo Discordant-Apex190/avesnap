@@ -9,7 +9,6 @@ dependencies = [
     "boto3>=1.42.49",
     "fsspec>=2026.2.0",
     "gcsfs>=2026.2.0",
-    "ipython>=9.10.0",
     "polars[pyarrow]>=1.38.1",
     "prefect>=3.6.18",
     "s3fs>=2026.2.0",
