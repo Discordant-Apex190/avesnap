@@ -1,5 +1,7 @@
 import boto3
+from botocore import UNSIGNED
 from botocore.config import Config
+
 import polars as pl
 import os
 from prefect import flow, task
@@ -12,8 +14,7 @@ def get_s3_uris():
     s3 = boto3.client(
     "s3",
     region_name="us-east-1",
-    config=Config(signature_version="unsigned")
-)
+    config=Config(signature_version=UNSIGNED))
     bucket = "gbif-open-data-us-east-1"
     response = s3.list_objects_v2(Bucket=bucket, Prefix="occurrence/", Delimiter="/")
     folders = [prefix.get("Prefix") for prefix in response.get("CommonPrefixes", [])]
