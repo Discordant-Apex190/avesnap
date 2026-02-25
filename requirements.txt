@@ -1,6 +1,7 @@
 # Core Dependencies
 adlfs>=2026.2.0
 boto3>=1.42.49
+botocore>=1.35.0
 fsspec>=2026.2.0
 gcsfs>=2026.2.0
 polars[pyarrow]>=1.38.1
@@ -8,7 +9,6 @@ prefect>=3.6.18
 s3fs>=2026.2.0
 streamlit>=1.54.0
 tqdm>=4.67.3
-
-# Extra utilities for the script
+prefect>=2.19.0
 requests>=2.31.0
 python-dotenv>=1.0.0

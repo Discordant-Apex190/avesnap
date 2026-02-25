@@ -5,7 +5,7 @@ number_of_results = 2
 endpoint = 'search/page'
 base_url = 'https://en.wikipedia.org/w/rest.php/v1/'
 
-headers = {'User-Agent': 'MediaWiki REST API docs examples/0.1 (https://meta.wikimedia.org/wiki/User:APaskulin_(WMF))'}
+headers = {'User-Agent': 'Avesnap- My birding data website'}
 
 url = base_url + endpoint
 response = requests.get(url, headers=headers, params={'q': search_query, 'limit': number_of_results})
