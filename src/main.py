@@ -1,6 +1,7 @@
 import boto3
 from botocore.handlers import disable_signing
 
+
 import polars as pl
 import os
 from prefect import flow, task
@@ -84,7 +85,7 @@ def process_aves_data(s3_uris: list) -> pl.LazyFrame:
 @task
 def join_common_names(lf_aves_data: pl.LazyFrame) -> pl.LazyFrame:
     """
-    Join common bird names to the previous filtered lazyframe gbif data
+    Join common bird names to the full filtered lazyframe gbif data to r2.
     """
     save_path_for_tsv = "data/vernacular_names.parquet"
     full_path = os.path.abspath(save_path_for_tsv)
@@ -132,7 +133,6 @@ storage_options = {
         "aws_endpoint": os.getenv("R2_ENDPOINT_URL"), 
         "aws_region": "auto",
     }
-
 @task
 def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
     """
@@ -152,41 +152,15 @@ def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
         row_group_size=ROW_GROUP_SIZE,
         storage_options=storage_options
     )
-
-
-@task
-def sink_state_aggregates(processed_s3_path: str):
-    """
-    Push aggregate parquet to r2.
-    """
-    ave_data_w_cnames = pl.scan_parquet(
-        processed_s3_path,
-        storage_options=storage_options
-    )
-    
-    state_stats = (
-        ave_data_w_cnames.group_by("stateprovince")
-        .agg(
-            pl.count("gbifid").alias("total_records"),
-            pl.sum("individualcount").alias("total_bird_count"),
-            pl.col("scientificname").n_unique().alias("unique_species_count")
-        )
-        .sort("total_bird_count", descending=True)
-    )
-    
-    remote_path = "s3://gbif-data-bucket/gbif_data/state_summary.parquet"
-    state_stats.sink_parquet(remote_path, storage_options=storage_options)
-
 @flow
 def avesnap_etl():
     s3_uris = get_s3_uris()
     lf_aves_data = process_aves_data(s3_uris)
     ave_data_w_cnames = join_common_names(lf_aves_data)
-    processed_path = "s3://gbif-data-bucket/gbif_data/processed_aves.parquet"
     sink_parquet(ave_data_w_cnames)
-    sink_state_aggregates(processed_path)
 
 if __name__ == "__main__":
     avesnap_etl.serve(
         name="avesnap_data_pipeline",
         cron="0 0 1 * *")
+
