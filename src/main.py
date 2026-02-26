@@ -1,7 +1,6 @@
 import boto3
 from botocore.handlers import disable_signing
 
-
 import polars as pl
 import os
 from prefect import flow, task
@@ -10,7 +9,7 @@ CHUNK_SIZE = 250 * (1024**2)
 ROW_GROUP_SIZE = 122880
 
 @task
-def get_s3_uris():
+def get_s3_uris() -> list:
     s3 = boto3.client("s3", region_name="us-east-1")
     s3.meta.events.register('choose-signer.s3.*', disable_signing)
     bucket = "gbif-open-data-us-east-1"
@@ -32,7 +31,7 @@ def get_s3_uris():
     return s3_uris
 
 @task
-def process_aves_data(s3_uris):
+def process_aves_data(s3_uris: list) -> pl.LazyFrame:
     lf_aves_data = pl.scan_parquet(
         s3_uris,
         storage_options={
@@ -83,7 +82,10 @@ def process_aves_data(s3_uris):
     return lf_aves_data
 
 @task
-def join_common_names(lf_aves_data):
+def join_common_names(lf_aves_data: pl.LazyFrame) -> pl.LazyFrame:
+    """
+    Join common bird names to the previous filtered lazyframe gbif data
+    """
     save_path_for_tsv = "data/vernacular_names.parquet"
     full_path = os.path.abspath(save_path_for_tsv)
     lf_common_name = pl.scan_parquet(source=full_path)
@@ -124,17 +126,20 @@ def join_common_names(lf_aves_data):
 # I intially had partitioning in mind to optimize for query performance, but given the reduced dataset size, 
 # but I decided to write it as a single file to simplify the process.
 # I'll leave it commented it out just in case I add more data.
-@task
-def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
-    storage_options = {
+storage_options = {
         "aws_access_key_id": os.getenv("R2_ACCESS_KEY_ID"),
         "aws_secret_access_key": os.getenv("R2_SECRET_ACCESS_KEY"),
         "aws_endpoint": os.getenv("R2_ENDPOINT_URL"), 
         "aws_region": "auto",
     }
+
+@task
+def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
+    """
+    Push full filtered lazyframe gbif data to r2.
+    """
     
-    bucket_name = "gbif-data-bucket"
-    remote_path = f"s3://{bucket_name}/gbif_data/processed_aves.parquet"
+    remote_path = "s3://gbif-data-bucket/gbif_data/processed_aves.parquet"
 
     ave_data_w_cnames.sink_parquet(
         # pl.PartitionBy(
@@ -148,15 +153,40 @@ def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
         storage_options=storage_options
     )
 
+
+@task
+def sink_state_aggregates(processed_s3_path: str):
+    """
+    Push aggregate parquet to r2.
+    """
+    ave_data_w_cnames = pl.scan_parquet(
+        processed_s3_path,
+        storage_options=storage_options
+    )
+    
+    state_stats = (
+        ave_data_w_cnames.group_by("stateprovince")
+        .agg(
+            pl.count("gbifid").alias("total_records"),
+            pl.sum("individualcount").alias("total_bird_count"),
+            pl.col("scientificname").n_unique().alias("unique_species_count")
+        )
+        .sort("total_bird_count", descending=True)
+    )
+    
+    remote_path = "s3://gbif-data-bucket/gbif_data/state_summary.parquet"
+    state_stats.sink_parquet(remote_path, storage_options=storage_options)
+
 @flow
 def avesnap_etl():
     s3_uris = get_s3_uris()
     lf_aves_data = process_aves_data(s3_uris)
     ave_data_w_cnames = join_common_names(lf_aves_data)
+    processed_path = "s3://gbif-data-bucket/gbif_data/processed_aves.parquet"
     sink_parquet(ave_data_w_cnames)
+    sink_state_aggregates(processed_path)
 
 if __name__ == "__main__":
     avesnap_etl.serve(
         name="avesnap_data_pipeline",
         cron="0 0 1 * *")
-
