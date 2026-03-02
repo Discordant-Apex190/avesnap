@@ -1,6 +1,5 @@
 import boto3
 from botocore.handlers import disable_signing
-import uuid
 import datetime
 import wikipedia
 
@@ -137,15 +136,15 @@ def join_wikipedia_data(ave_data_w_cnames: pl.LazyFrame) -> pl.LazyFrame:
         rate_limit=True, min_wait=datetime.timedelta(0, 0, 50000)
     )
     unique_species = ave_data_w_cnames.select("scientificname").unique().collect()
-    
+
     wiki_records = []
-    
+
     for row in unique_species.iter_rows(named=True):
         scientificname = row["scientificname"]
-        
+
         try:
             page = wikipedia.page(scientificname, auto_suggest=False)
-            
+            references = wikipedia.WikipediaPage.references
             content = page.content
             if "== References ==" in content:
                 content = content.split("== References ==", 1)[0]
@@ -153,39 +152,42 @@ def join_wikipedia_data(ave_data_w_cnames: pl.LazyFrame) -> pl.LazyFrame:
             images = page.images
             jpgs = [img for img in images if ".jpg" in img.lower()]
             pngs = [img for img in images if ".png" in img.lower()]
-            
+
             if jpgs:
                 image = jpgs[0]
             elif pngs:
                 image = pngs[0]
             else:
                 image = None
-            
-            wiki_records.append({
-                "scientificname": scientificname,
-                "wiki_content": content,
-                "wiki_image": image,
-            })
-            
+
+            wiki_records.append(
+                {
+                    "scientificname": scientificname,
+                    "wiki_content": content,
+                    "wiki_references": references,
+                    "wiki_image": image,
+                }
+            )
+
         except Exception as e:
             print(f"Could not fetch Wikipedia data for {scientificname}: {e}")
-            
-            wiki_records.append({
-                "scientificname": scientificname,
-                "wiki_content": None,
-                "wiki_image": None,
-            })
-    
+
+            wiki_records.append(
+                {
+                    "scientificname": scientificname,
+                    "wiki_content": content,
+                    "wiki_references": references,
+                    "wiki_image": image,
+                }
+            )
+
     df_wiki = pl.DataFrame(wiki_records)
     lf_wiki = df_wiki.lazy()
-    
-    result = ave_data_w_cnames.join(
-        lf_wiki, 
-        on="scientificname", 
-        how="left"
-    )
-    
+
+    result = ave_data_w_cnames.join(lf_wiki, on="scientificname", how="left")
+
     return result
+
 
 # After running the code I realized that the filtering made the dataset small enough to be written in a single file,
 # I intially had partitioning in mind to optimize for query performance, but given the reduced dataset size,
