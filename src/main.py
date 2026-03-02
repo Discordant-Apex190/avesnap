@@ -132,10 +132,10 @@ def join_wikipedia_data(ave_data_w_cnames: pl.LazyFrame) -> pl.LazyFrame:
     """
     Fetch Wikipedia data for unique species and join to the main dataset.
     """
+    wikipedia.set_user_agent("Avesnap (support@avesnap.com)")
     wikipedia.set_rate_limiting(
         rate_limit=True, min_wait=datetime.timedelta(0, 0, 50000)
     )
-
     unique_species = ave_data_w_cnames.select("scientificname").unique().collect()
     
     wiki_records = []
