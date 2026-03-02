@@ -141,6 +141,11 @@ def join_wikipedia_data(ave_data_w_cnames: pl.LazyFrame) -> pl.LazyFrame:
 
     for row in unique_species.iter_rows(named=True):
         scientificname = row["scientificname"]
+        
+        # Initialize variables with default values to fix the errors
+        content = None
+        references = None
+        image = None
 
         try:
             page = wikipedia.page(scientificname, auto_suggest=False)
