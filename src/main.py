@@ -1,6 +1,8 @@
 import boto3
 from botocore.handlers import disable_signing
-
+import uuid
+import datetime
+import wikipedia
 
 import polars as pl
 import os
@@ -9,10 +11,11 @@ from prefect import flow, task
 CHUNK_SIZE = 250 * (1024**2)
 ROW_GROUP_SIZE = 122880
 
+
 @task
 def get_s3_uris() -> list:
     s3 = boto3.client("s3", region_name="us-east-1")
-    s3.meta.events.register('choose-signer.s3.*', disable_signing)
+    s3.meta.events.register("choose-signer.s3.*", disable_signing)
     bucket = "gbif-open-data-us-east-1"
     response = s3.list_objects_v2(Bucket=bucket, Prefix="occurrence/", Delimiter="/")
     folders = [prefix.get("Prefix") for prefix in response.get("CommonPrefixes", [])]
@@ -30,6 +33,7 @@ def get_s3_uris() -> list:
                     s3_uris.append(f"s3://{bucket}/{key}")
     print(f"Found {len(s3_uris)} data files to process.")
     return s3_uris
+
 
 @task
 def process_aves_data(s3_uris: list) -> pl.LazyFrame:
@@ -82,6 +86,7 @@ def process_aves_data(s3_uris: list) -> pl.LazyFrame:
     )
     return lf_aves_data
 
+
 @task
 def join_common_names(lf_aves_data: pl.LazyFrame) -> pl.LazyFrame:
     """
@@ -91,9 +96,7 @@ def join_common_names(lf_aves_data: pl.LazyFrame) -> pl.LazyFrame:
     full_path = os.path.abspath(save_path_for_tsv)
     lf_common_name = pl.scan_parquet(source=full_path)
     ave_data_w_cnames = lf_aves_data.join(
-        lf_common_name, 
-        left_on="taxonkey",
-        right_on="taxonID"
+        lf_common_name, left_on="taxonkey", right_on="taxonID"
     )
     ave_data_w_cnames = ave_data_w_cnames.select(
         "gbifid",
@@ -117,28 +120,91 @@ def join_common_names(lf_aves_data: pl.LazyFrame) -> pl.LazyFrame:
         "mediatype",
     ).with_columns(
         (
-            pl.lit("https://www.gbif.org/occurrence/") + pl.col("gbifid").cast(pl.String)
+            pl.lit("https://www.gbif.org/occurrence/")
+            + pl.col("gbifid").cast(pl.String)
         ).alias("gbif_link")
     )
     return ave_data_w_cnames
 
 
-# After running the code I realized that the filtering made the dataset small enough to be written in a single file, 
-# I intially had partitioning in mind to optimize for query performance, but given the reduced dataset size, 
+@task
+def join_wikipedia_data(ave_data_w_cnames: pl.LazyFrame) -> pl.LazyFrame:
+    """
+    Fetch Wikipedia data for unique species and join to the main dataset.
+    """
+    wikipedia.set_rate_limiting(
+        rate_limit=True, min_wait=datetime.timedelta(0, 0, 50000)
+    )
+
+    unique_species = ave_data_w_cnames.select("scientificname").unique().collect()
+    
+    wiki_records = []
+    
+    for row in unique_species.iter_rows(named=True):
+        scientificname = row["scientificname"]
+        
+        try:
+            page = wikipedia.page(scientificname, auto_suggest=False)
+            
+            content = page.content
+            if "== References ==" in content:
+                content = content.split("== References ==", 1)[0]
+
+            images = page.images
+            jpgs = [img for img in images if ".jpg" in img.lower()]
+            pngs = [img for img in images if ".png" in img.lower()]
+            
+            if jpgs:
+                image = jpgs[0]
+            elif pngs:
+                image = pngs[0]
+            else:
+                image = None
+            
+            wiki_records.append({
+                "scientificname": scientificname,
+                "wiki_content": content,
+                "wiki_image": image,
+            })
+            
+        except Exception as e:
+            print(f"Could not fetch Wikipedia data for {scientificname}: {e}")
+            
+            wiki_records.append({
+                "scientificname": scientificname,
+                "wiki_content": None,
+                "wiki_image": None,
+            })
+    
+    df_wiki = pl.DataFrame(wiki_records)
+    lf_wiki = df_wiki.lazy()
+    
+    result = ave_data_w_cnames.join(
+        lf_wiki, 
+        on="scientificname", 
+        how="left"
+    )
+    
+    return result
+
+# After running the code I realized that the filtering made the dataset small enough to be written in a single file,
+# I intially had partitioning in mind to optimize for query performance, but given the reduced dataset size,
 # but I decided to write it as a single file to simplify the process.
 # I'll leave it commented it out just in case I add more data.
 storage_options = {
-        "aws_access_key_id": os.getenv("R2_ACCESS_KEY_ID"),
-        "aws_secret_access_key": os.getenv("R2_SECRET_ACCESS_KEY"),
-        "aws_endpoint": os.getenv("R2_ENDPOINT_URL"), 
-        "aws_region": "auto",
-    }
+    "aws_access_key_id": os.getenv("R2_ACCESS_KEY_ID"),
+    "aws_secret_access_key": os.getenv("R2_SECRET_ACCESS_KEY"),
+    "aws_endpoint": os.getenv("R2_ENDPOINT_URL"),
+    "aws_region": "auto",
+}
+
+
 @task
 def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
     """
     Push full filtered lazyframe gbif data to r2.
     """
-    
+
     remote_path = "s3://gbif-data-bucket/gbif_data/processed_aves.parquet"
 
     ave_data_w_cnames.sink_parquet(
@@ -150,17 +216,18 @@ def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
         remote_path,
         compression="zstd",
         row_group_size=ROW_GROUP_SIZE,
-        storage_options=storage_options
+        storage_options=storage_options,
     )
+
+
 @flow
 def avesnap_etl():
     s3_uris = get_s3_uris()
     lf_aves_data = process_aves_data(s3_uris)
     ave_data_w_cnames = join_common_names(lf_aves_data)
-    sink_parquet(ave_data_w_cnames)
+    wiki_data = join_wikipedia_data(ave_data_w_cnames)
+    sink_parquet(wiki_data)
+
 
 if __name__ == "__main__":
-    avesnap_etl.serve(
-        name="avesnap_data_pipeline",
-        cron="0 0 1 * *")
-
+    avesnap_etl.serve(name="avesnap_data_pipeline", cron="0 0 1 * *")
