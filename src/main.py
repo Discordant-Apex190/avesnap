@@ -149,7 +149,12 @@ def join_wikipedia_data(ave_data_w_cnames: pl.LazyFrame) -> pl.LazyFrame:
         image = None
 
         try:
-            page = wikipedia.page(scientificname, auto_suggest=False)
+            # Extract just the genus and species (first two words) for Wikipedia lookup
+            # e.g., "Coccyzus americanus (Linnaeus, 1758)" -> "Coccyzus americanus"
+            species_parts = scientificname.split()
+            clean_name = " ".join(species_parts[:2]) if len(species_parts) >= 2 else scientificname
+            
+            page = wikipedia.page(clean_name, auto_suggest=False)
             references = page.references
             content = page.content
             if "== References ==" in content:
