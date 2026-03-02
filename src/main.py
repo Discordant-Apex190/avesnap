@@ -6,6 +6,7 @@ import wikipedia
 import polars as pl
 import os
 from prefect import flow, task
+from prefect.cache_policies import NONE
 
 CHUNK_SIZE = 250 * (1024**2)
 ROW_GROUP_SIZE = 122880
@@ -34,7 +35,7 @@ def get_s3_uris() -> list:
     return s3_uris
 
 
-@task
+@task(cache_policy=NONE)
 def process_aves_data(s3_uris: list) -> pl.LazyFrame:
     lf_aves_data = pl.scan_parquet(
         s3_uris,
@@ -86,7 +87,7 @@ def process_aves_data(s3_uris: list) -> pl.LazyFrame:
     return lf_aves_data
 
 
-@task
+@task(cache_policy=NONE)
 def join_common_names(lf_aves_data: pl.LazyFrame) -> pl.LazyFrame:
     """
     Join common bird names to the full filtered lazyframe gbif data to r2.
@@ -126,7 +127,7 @@ def join_common_names(lf_aves_data: pl.LazyFrame) -> pl.LazyFrame:
     return ave_data_w_cnames
 
 
-@task
+@task(cache_policy=NONE)
 def join_wikipedia_data(ave_data_w_cnames: pl.LazyFrame) -> pl.LazyFrame:
     """
     Fetch Wikipedia data for unique species and join to the main dataset.
@@ -149,7 +150,7 @@ def join_wikipedia_data(ave_data_w_cnames: pl.LazyFrame) -> pl.LazyFrame:
 
         try:
             page = wikipedia.page(scientificname, auto_suggest=False)
-            references = wikipedia.WikipediaPage.references
+            references = page.references
             content = page.content
             if "== References ==" in content:
                 content = content.split("== References ==", 1)[0]
@@ -206,7 +207,7 @@ storage_options = {
 }
 
 
-@task
+@task(cache_policy=NONE)
 def sink_parquet(ave_data_w_cnames: pl.LazyFrame):
     """
     Push full filtered lazyframe gbif data to r2.
