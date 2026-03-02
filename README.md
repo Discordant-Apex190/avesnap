@@ -1,6 +1,6 @@
 # GBIF Bird Data ETL & Visualization Pipeline
 
-Currently, a pipeline runs on my Hetzner server to pull GBIF data from the open S3 bucket they host for occurrences.
+The core pipeline is hosted on Hetzner and managed via Coolify, utilizing Prefect for orchestration.
 
 ## ETL Process
 
@@ -8,7 +8,8 @@ Currently, a pipeline runs on my Hetzner server to pull GBIF data from the open 
 
 **Transformation:** Data is filtered using Polars (utilizing lazy frames for efficiency).
 
-**Loading:** The resulting data is sunk into a Parquet file and stored in Cloudflare R2.
+**Loading:** Sinks transformed data into Parquet gile.
+             Deployed to Cloudflare R2 behind a custom DNS.
 
 **Partitioning:** I considered partitioning the Parquet by state or year, but because the file compresses into such a small size, partitioning is currently inefficient and was skipped.
 
@@ -16,24 +17,18 @@ Currently, a pipeline runs on my Hetzner server to pull GBIF data from the open 
 
 **Tooling:** Prefect wraps the single script to monitor the flow and provide visibility.
 
-**Deployment:** The process runs on my server.
+**Deployment:** A prefect serve instance runs within a Coolify managed container.
 
-**Schedule:** It runs every month via a cron job using the `prefect serve` command.
+**Schedule:** Monthly cron job, aligned with GBIF’s data release cycles.
 
 ## Future Roadmap
 
 ### Frontend & Content
 
-**Astro Site:** I will be creating an Astro site to generate dynamic routes for each bird found in the filtered GBIF data.
+**Astro Site:** Automatically generate a unique, SEO-friendly route for every bird species found in the filtered dataset.
 
-**Data Enrichment:** Eventually, I'll pull in bird description and history data to populate these routes.
+**Data Enrichment:** Integrating Wikipedia/GBIF API hooks to pull in species descriptions, conservation status, and historical metadata.
 
 ### Client-Side Analytics
 
-**DuckDB-Wasm:** I will use DuckDB-Wasm in the browser to allow client-side querying.
-
-**Mapping:** This data will feed into an interactive map for users to filter. I am currently deciding between:
-
-- Leaflet
-- deck.gl
-- H3 (or similar spatial indexing)
+**Mapping:** This data will feed into an interactive map for users to filter using leaflet and javascript
